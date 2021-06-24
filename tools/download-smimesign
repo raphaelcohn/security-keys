@@ -1,0 +1,178 @@
+#!/usr/bin/env sh
+# This file is part of security-keys. It is subject to the license terms in the COPYRIGHT file found in the top-level directory of this distribution and at https://raw.githubusercontent.com/raphaelcohn/security-keys/master/COPYRIGHT. No part of security-keys, including this file, may be copied, modified, propagated, or distributed except according to the terms contained in the COPYRIGHT file.
+# Copyright © 2021 The developers of security-keys. See the COPYRIGHT file in the top-level directory of this distribution and at https://raw.githubusercontent.com/raphaelcohn/security-keys/master/COPYRIGHT.
+
+
+set -e
+set -u
+set -f
+
+_program_path_find()
+{
+	if [ "${0%/*}" = "$0" ]; then
+
+		# We've been invoked by the interpreter as, say, bash program
+		if [ -r "$0" ]; then
+			pwd -P
+		# Clutching at straws; probably run via a download, anonymous script, etc, weird execve, etc
+		else
+			printf '\n'
+		fi
+
+	else
+
+		# We've been invoked with a relative or absolute path (also when invoked via PATH in a shell)
+
+		_program_path_find_parentPath()
+		{
+			parentPath="${scriptPath%/*}"
+			if [ -z "$parentPath" ]; then
+				parentPath='/'
+			fi
+			cd "$parentPath" 1>/dev/null
+		}
+
+		# pdksh / mksh have problems with unsetting a variable that was never set...
+		if [ "${CDPATH+set}" = 'set' ]; then
+			unset CDPATH
+		fi
+
+		if command -v realpath 1>/dev/null 2>/dev/null; then
+			(
+				scriptPath="$(realpath "$0")"
+
+				_program_path_find_parentPath
+				pwd -P
+			)
+		elif command -v readlink 1>/dev/null 2>/dev/null; then
+			(
+				local recursionDepth=0
+				_program_path_resolve_symlinks_recursively()
+				{
+					local unresolvedPath="$1"
+					
+					recursionDepth=$((recursionDepth + 1))
+					
+					if [ $recursionDepth -gt 10 ]; then
+						printf '%s\n' 'Recursion to depths greater than 10 is not allowed when resolving links.'
+						return 1
+					fi
+					
+					local potentialLinkDestination="$(readlink -- "$unresolvedPath")"
+					
+					if [ -z "$potentialLinkDestination" ]; then
+						scriptPath="$unresolvedPath"
+						return 0
+					fi
+					local linkDestination="$potentialLinkDestination"
+					local parentFolderPath="${unresolvedPath%/*}"
+					
+					if [ "$parentFolderPath" = "$unresolvedPath" ]; then
+						_program_path_resolve_symlinks_recursively "$linkDestination"
+					else
+						case "$linkDestination" in
+														
+							/*)
+								_program_path_resolve_symlinks_recursively "$linkDestination"
+							;;
+							
+							*)
+								_program_path_resolve_symlinks_recursively "$parentFolderPath"/"$linkDestination"
+							;;
+							
+						esac
+					fi
+				}
+
+				scriptPath="$0"
+				_program_path_resolve_symlinks_recursively "$scriptPath"
+
+				_program_path_find_parentPath
+				pwd -P
+			)
+		else
+			# This approach will fail in corner cases where the script itself is a symlink in a path not parallel with the concrete script
+			(
+				scriptPath="$0"
+
+				_program_path_find_parentPath
+				pwd -P
+			)
+		fi
+
+	fi
+}
+
+cd "$(_program_path_find)"/.. 1>/dev/null 2>/dev/null
+_program_name='download-smimesign'
+. functions/common.sh
+. functions/download.sh
+. functions/smimesign.sh
+
+depends tar rm chmod mv
+download_and_extract_tarball()
+{
+	local url="$1"
+
+	download_to_folder_path="$TMPDIR"/downloaded-tarball
+	download_file_name=download.tar.gz
+	
+	mkdir -m 0700 -p "$download_to_folder_path"
+	
+	local failed
+	download_using_curl "$url" "$download_to_folder_path" "$download_file_name" 1.3
+	
+	if $failed; then
+		return 0
+	fi
+	
+	cd "$download_to_folder_path" 1>/dev/null 2>/dev/null
+		tar -x -f "$download_file_name"
+		rm "$download_file_name"
+	cd - 1>/dev/null 2>/dev/null
+	
+	mkdir -m 0700 -p "$smimesign_folder_path"
+	chmod 0700 "$download_to_folder_path"/smimesign
+	mv "$download_to_folder_path"/smimesign "$smimesign_folder_path"
+}
+
+download_smimesign_for_macos()
+{
+	local smimesign_version="$1"
+	local operating_system="$2"
+	local architecture="$3"
+	
+	local smimesign_parent_folder_path="$smimesign_root_path"/"$smimesign_version"/"$operating_system"
+	local smimesign_folder_path="$smimesign_parent_folder_path"/"$architecture"
+	
+	local smimesign_binary_file_path="$smimesign_folder_path"/smimesign
+	local is_usable
+	file_is_usable "$smimesign_binary_file_path"
+	if [ $is_usable ]; then
+		if [ -x "$smimesign_binary_file_path" ]; then
+			return 0
+		fi
+	fi
+	
+	download_and_extract_tarball https://github.com/github/smimesign/releases/download/v"$smimesign_version"/smimesign-"$smimesign_version"-macos.tgz
+}
+
+main()
+{
+	local temporary_folder_path="$(pwd)"/temporary
+	make_temporary_folder
+	
+	local smimesign_root_path
+	set_smimesign_root_path
+	
+	local smimesign_version
+	set_smimesign_version
+	
+	singleton_instance_lock 'download-smimesign'
+	
+	local tools_folder_path="$(pwd)"/tools
+	
+	download_smimesign_for_macos "$smimesign_version" osx amd64
+}
+
+main "$@"

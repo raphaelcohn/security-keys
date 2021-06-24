@@ -1,0 +1,417 @@
+#!/usr/bin/env sh
+# This file is part of security-keys. It is subject to the license terms in the COPYRIGHT file found in the top-level directory of this distribution and at https://raw.githubusercontent.com/raphaelcohn/security-keys/master/COPYRIGHT. No part of security-keys, including this file, may be copied, modified, propagated, or distributed except according to the terms contained in the COPYRIGHT file.
+# Copyright © 2021 The developers of security-keys. See the COPYRIGHT file in the top-level directory of this distribution and at https://raw.githubusercontent.com/raphaelcohn/security-keys/master/COPYRIGHT.
+
+
+set -e
+set -u
+set -f
+
+_program_path_find()
+{
+	if [ "${0%/*}" = "$0" ]; then
+
+		# We've been invoked by the interpreter as, say, bash program
+		if [ -r "$0" ]; then
+			pwd -P
+		# Clutching at straws; probably run via a download, anonymous script, etc, weird execve, etc
+		else
+			printf '\n'
+		fi
+
+	else
+
+		# We've been invoked with a relative or absolute path (also when invoked via PATH in a shell)
+
+		_program_path_find_parentPath()
+		{
+			parentPath="${scriptPath%/*}"
+			if [ -z "$parentPath" ]; then
+				parentPath='/'
+			fi
+			cd "$parentPath" 1>/dev/null
+		}
+
+		# pdksh / mksh have problems with unsetting a variable that was never set...
+		if [ "${CDPATH+set}" = 'set' ]; then
+			unset CDPATH
+		fi
+
+		if command -v realpath 1>/dev/null 2>/dev/null; then
+			(
+				scriptPath="$(realpath "$0")"
+
+				_program_path_find_parentPath
+				pwd -P
+			)
+		elif command -v readlink 1>/dev/null 2>/dev/null; then
+			(
+				local recursionDepth=0
+				_program_path_resolve_symlinks_recursively()
+				{
+					local unresolvedPath="$1"
+					
+					recursionDepth=$((recursionDepth + 1))
+					
+					if [ $recursionDepth -gt 10 ]; then
+						printf '%s\n' 'Recursion to depths greater than 10 is not allowed when resolving links.'
+						return 1
+					fi
+					
+					local potentialLinkDestination="$(readlink -- "$unresolvedPath")"
+					
+					if [ -z "$potentialLinkDestination" ]; then
+						scriptPath="$unresolvedPath"
+						return 0
+					fi
+					local linkDestination="$potentialLinkDestination"
+					local parentFolderPath="${unresolvedPath%/*}"
+					
+					if [ "$parentFolderPath" = "$unresolvedPath" ]; then
+						_program_path_resolve_symlinks_recursively "$linkDestination"
+					else
+						case "$linkDestination" in
+								
+							/*)
+								_program_path_resolve_symlinks_recursively "$linkDestination"
+							;;
+							
+							*)
+								_program_path_resolve_symlinks_recursively "$parentFolderPath"/"$linkDestination"
+							;;
+							
+						esac
+					fi
+				}
+
+				scriptPath="$0"
+				_program_path_resolve_symlinks_recursively "$scriptPath"
+
+				_program_path_find_parentPath
+				pwd -P
+			)
+		else
+			# This approach will fail in corner cases where the script itself is a symlink in a path not parallel with the concrete script
+			(
+				scriptPath="$0"
+
+				_program_path_find_parentPath
+				pwd -P
+			)
+		fi
+
+	fi
+}
+
+cd "$(_program_path_find)" 1>/dev/null 2>/dev/null
+
+cd "$(pwd)"/..
+_program_name='yubikey'
+. functions/common.sh
+PATH=/usr/local/bin:"$PATH"
+. tools/brew.sh
+. tools/gnupg.sh
+
+ensure_package_installed()
+{
+	local package="$1"
+	
+	local changes_made_using_brew=false
+	
+	install_using_brew "$package"
+	
+	clean_up_brew
+}
+
+ensure_gnupg_installed()
+{
+	ensure_package_installed gnupg
+}
+
+verb_install()
+{
+	if [ $# -ne 0 ]; then
+		exit_usage_message "Verb instal does not take any arguments"
+	fi
+	
+	local changes_made_using_brew=false
+	
+	install_using_brew gnupg
+	install_using_brew yubikey-personalization
+	install_using_brew hopenpgp-tools
+	install_using_brew ykman
+	install_using_brew pinentry-mac
+	
+	clean_up_brew
+}
+
+verb_uninstall()
+{
+	if [ $# -ne 0 ]; then
+		exit_usage_message "Verb uninstall does not take any arguments"
+	fi
+	
+	local changes_made_using_brew=false
+	
+	uninstall_using_brew pinentry-mac
+	uninstall_using_brew ykman
+	uninstall_using_brew hopenpgp-tools
+	uninstall_using_brew yubikey-personalization
+	uninstall_using_brew gnupg
+	
+	clean_up_brew
+}
+
+verb_gnupg_create_master_key()
+{
+	if [ $# -ne 2 ]; then
+		exit_usage_message "Verb gnupg_create_master_key takes two arguments"
+	fi
+	
+	# eg 'Raphael Cohn'
+	local name="$1"
+	
+	# eg 'raphael.cohn@stormmq.com'
+	local email="$2"
+	
+	ensure_gnupg_installed
+
+	local GNUPGHOME="$TMPDIR"/gpghome
+	gnupg_create_temporary_home
+	
+	local number_of_bytes_in_passphrase=32
+	local creation_seconds_since_unix_epoch="$(now_utc_epoch_seconds)"
+	local utf8_encoded_passphrase="$(gnupg_generate_random_number "$number_of_bytes_in_passphrase" true)"
+	local output_master_key_file_path="$TMPDIR"/master-key.pgp
+	
+	gnupg_generate_master_key "$name" "$email" "$creation_seconds_since_unix_epoch" "$output_master_key_file_path"
+	
+	gnupg_add_sub_keys "$output_master_key_file_path"
+	
+	printf '%s\n' "$utf8_encoded_passphrase"
+}
+
+depends stty
+securely_read_value()
+{
+	local name_of_value="$1"
+	
+	local original_stty="$(stty -g)"
+	stty -echo
+	
+		printf 'Please enter a %s: ' "$name_of_value" 1>&2
+		local attempt1
+		read -r attempt1
+
+		printf 'Please confirm a %s: ' "$name_of_value" 1>&2
+		local attempt2
+		read -r attempt2
+	
+	stty "$original_stty"
+	
+	if [ "$attempt1" != "$attempt2" ]; then
+		exit_error_message 'Values do not match'
+	fi
+	
+	value="$attempt1"
+}
+
+verb_yubikey_configure()
+{
+	case $# in
+		
+		0)
+			set -- ykman
+		;;
+		
+		1)
+			set -- ykman --device "$1"
+		;;
+		
+		*)
+			exit_error_message "0 or 1 arguments"
+		;;
+		
+	esac
+
+	ensure_ykman_installed
+	ensure_ykpers_installed
+	
+	local value
+	securely_read_value 'OpenPGP PIN'
+	local openpgp_pin="$value"
+	
+	securely_read_value 'OpenPGP ADMIN PIN'
+	local openpgp_admin_pin="$value"
+	
+	"$@" config usb --enable-all
+	"$@" config usb --disable 'FIDO U2F'
+	
+	"$@" config nfc --enable-all
+	"$@" config nfc --disable 'FIDO U2F'
+	"$@" config nfc --disable 'OTP'
+	"$@" config nfc --disable 'YubiHSM Auth'
+	"$@" config nfc --disable 'OpenPGP'
+	"$@" config nfc --disable 'PIV'
+	
+	set +e
+		"$@" config set-lock-code --generate
+	set -e
+	
+	# --force must occur within 5 seconds of key insertion!
+	# This resets the FIDO2 PIN as well.
+	"$@" fido reset --force
+	
+	printf 'Enter a FIDO2 PIN below\n' 1>&2
+	"$@" fido access change-pin
+	
+	# This seems to be possible at any time.
+	# This resets the OATH password as well.
+	"$@" oath reset --force
+	
+	printf 'Enter a password to protect OATH below\n' 1>&2
+	"$@" oath access change
+	
+	# This seems to be possible at any time.
+	# This resets the PINs as well to the defaults of 123456 and 12345678.
+	"$@" openpgp reset --force
+	
+	# Default is 3.
+	local pin_retries=5
+	
+	# Default is 0.
+	local reset_code_reties=3
+	
+	# Default is 3.
+	local admin_pin_retries=3
+	
+	local default_openpgp_admin_pin=12345678
+	"$@" openpgp access --admin-pin "$default_openpgp_admin_pin" "$pin_retries" "$reset_code_reties" "$admin_pin_retries"
+	
+	# Forces touch policy on but caches each touch for 15 seconds.
+	# This isn't the most secure setting, but it is useful for doing key manipulation; think sudo.
+	local key_slot
+	for key_slot in sig enc aut att
+	do
+		"$@" openpgp keys set-touch --admin-pin "$default_openpgp_admin_pin" "$key_slot" Cached-Fixed
+	done
+	
+	# Configure OpenPGP using OpenPGP: https://support.yubico.com/hc/en-us/articles/360016649139-YubiKey-5-2-3-Enhancements-to-OpenPGP-3-4-Support
+	
+	# Enable OpenPGP Key Derived Format (KDF) for PINs and set PINs.
+	cat >"$TMPDIR"/command.gpg <<-EOF
+		admin
+		kdf-setup
+		passwd
+		1
+	EOF
+	
+	# This fails.
+	gpg --homedir "$TMPDIR"/gpghome --no-option --command-file "$TMPDIR"/command.gpg --status-fd 2 --edit-card
+	
+	# Can be used for setting PINs and reset codes.
+	
+	# Clean Yubi OTP slots.
+	ykpersonalize -1 -z
+	ykpersonalize -2 -z
+	
+	# Generate OpenPGP public-private key pairs
+	gnupg_generate_secure_public_private_key_pairs
+}
+
+verb_yubikey_oath_add_uri()
+{
+	# uri must start 'otpath://'.
+
+	case $# in
+		
+		1)
+			local uri="$1"
+			set -- ykman
+		;;
+		
+		2)
+			local uri="$1"
+			set -- ykman --device "$2"
+		;;
+		
+		*)
+			exit_error_message "1 or 2 arguments"
+		;;
+		
+	esac
+
+	ensure_ykman_installed
+	
+	"$@" oath accounts uri "$uri"
+}
+
+parse_arguments()
+{
+	local help_message="./$_program_name verb
+Where verb is:-
+
+help
+install
+uninstall
+gnupg_create_master_key <name> <email>
+
+If called without arguments assumed to be the same as 'install'.
+"
+	
+	case $# in
+		
+		0)
+			local verb='install'
+		;;
+		
+		*)
+			local verb="$1"
+			shift 1
+			case "$verb" in
+				
+				help|-h|-help|--help)
+					exit_help_message "$help_message"
+				;;
+				
+				install)
+					:
+				;;
+				
+				uninstall)
+					:
+				;;
+				
+				gnupg_create_master_key)
+					:
+				;;
+				
+				yubikey_configure)
+					:
+				;;
+				
+				yubikey_oath_add_uri)
+					:
+				;;
+				
+				*)
+					exit_usage_message "$help_message"
+				;;
+				
+			esac
+		;;
+		
+	esac
+	
+	verb_${verb} "$@"
+}
+
+main()
+{
+	local temporary_folder_path="$(pwd)"/temporary
+	make_temporary_folder
+	
+	parse_arguments "$@"
+}
+
+main "$@"
