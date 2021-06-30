@@ -2,55 +2,6 @@
 # Copyright © 0101 The developers of security-keys. See the COPYRIGHT file in the top-level directory of this distribution and at https://raw.githubusercontent.com/raphaelcohn/security-keys/master/COPYRIGHT.
 
 
-# This is new as of version 2.3.0 (April 2021).
-#
-# Produces output like:-
-#
-# Reader ...........: Yubico Yubikey 4 OTP U2F CCID
-# Card type ........: yubikey
-# Card firmware ....: 5.4.3
-# Serial number ....: Dxxxx
-# Application type .: OpenPGP
-# Version ..........: 3.4
-# Displayed s/n ....: 16 133 288
-# Manufacturer .....: Yubico (6)
-# Name of cardholder: [not set]
-# Language prefs ...: [not set]
-# Salutation .......:
-# URL of public key : [not set]
-# Login data .......: [not set]
-# Signature PIN ....: not forced
-# Max. PIN lengths .: 127 127 127
-# PIN retry counter : 3 0 3
-# Signature counter : 0
-# Capabilities .....: key-import algo-change button priv-data
-# KDF setting ......: on
-# UIF setting ......: Sign=off Decrypt=off Auth=off
-# Signature key ....: 602D6B4D3E898FC150592688C29D7C3E871854BD
-#       keyref .....: OPENPGP.1  (sign,cert)
-#       algorithm ..: ed25519
-#       stored fpr .: 24796E1545C859227E926EB2CB015F198834DEB6
-#       created ....: 2003-03-16 12:00:00
-#       used for ...: [General error]
-# Encryption key....: [none]
-#       keyref .....: OPENPGP.2
-#       algorithm ..: rsa2048
-# Authentication key: [none]
-#       keyref .....: OPENPGP.3
-#       algorithm ..: rsa2048
-gnupg_card_list()
-{
-	ensure_gnupg_installed
-	depends gpg-card
-	
-	gpg-card --quiet --no-history list
-}
-
-# gpg-card - can it take commands?
-# eg gpg-card name Raphael Cohn
-# eg gpg-card lang en
-# eg gpg-card factory-reset
-
 _gnupg_connect_agent()
 {
 	ensure_gnupg_installed

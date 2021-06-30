@@ -110,10 +110,10 @@ _program_name='smimesign'
 
 main()
 {
-	set_smimesign_root_path
+	smimesign_set_root_path
 	
 	local smimesign_parent_path
-	set_smimesign_parent_path
+	smimesign_set_parent_path
 	
 	local smimesign_binary_path="$smimesign_parent_path"/smimesign
 	if [ ! -x "$smimesign_binary_path" ]; then

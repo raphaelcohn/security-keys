@@ -163,10 +163,10 @@ main()
 	make_temporary_folder
 	
 	local smimesign_root_path
-	set_smimesign_root_path
+	smimesign_set_root_path
 	
 	local smimesign_version
-	set_smimesign_version
+	smimesign_set_version
 	
 	singleton_instance_lock 'download-smimesign'
 	

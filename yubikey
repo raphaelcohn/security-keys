@@ -104,92 +104,11 @@ _program_path_find()
 }
 
 cd "$(_program_path_find)" 1>/dev/null 2>/dev/null
-
-cd "$(pwd)"/..
 _program_name='yubikey'
 . functions/common.sh
 PATH=/usr/local/bin:"$PATH"
-. tools/brew.sh
-. tools/gnupg.sh
-
-ensure_package_installed()
-{
-	local package="$1"
-	
-	local changes_made_using_brew=false
-	
-	install_using_brew "$package"
-	
-	clean_up_brew
-}
-
-ensure_gnupg_installed()
-{
-	ensure_package_installed gnupg
-}
-
-verb_install()
-{
-	if [ $# -ne 0 ]; then
-		exit_usage_message "Verb instal does not take any arguments"
-	fi
-	
-	local changes_made_using_brew=false
-	
-	install_using_brew gnupg
-	install_using_brew yubikey-personalization
-	install_using_brew hopenpgp-tools
-	install_using_brew ykman
-	install_using_brew pinentry-mac
-	
-	clean_up_brew
-}
-
-verb_uninstall()
-{
-	if [ $# -ne 0 ]; then
-		exit_usage_message "Verb uninstall does not take any arguments"
-	fi
-	
-	local changes_made_using_brew=false
-	
-	uninstall_using_brew pinentry-mac
-	uninstall_using_brew ykman
-	uninstall_using_brew hopenpgp-tools
-	uninstall_using_brew yubikey-personalization
-	uninstall_using_brew gnupg
-	
-	clean_up_brew
-}
-
-verb_gnupg_create_master_key()
-{
-	if [ $# -ne 2 ]; then
-		exit_usage_message "Verb gnupg_create_master_key takes two arguments"
-	fi
-	
-	# eg 'Raphael Cohn'
-	local name="$1"
-	
-	# eg 'raphael.cohn@stormmq.com'
-	local email="$2"
-	
-	ensure_gnupg_installed
-
-	local GNUPGHOME="$TMPDIR"/gpghome
-	gnupg_create_temporary_home
-	
-	local number_of_bytes_in_passphrase=32
-	local creation_seconds_since_unix_epoch="$(now_utc_epoch_seconds)"
-	local utf8_encoded_passphrase="$(gnupg_generate_random_number "$number_of_bytes_in_passphrase" true)"
-	local output_master_key_file_path="$TMPDIR"/master-key.pgp
-	
-	gnupg_generate_master_key "$name" "$email" "$creation_seconds_since_unix_epoch" "$output_master_key_file_path"
-	
-	gnupg_add_sub_keys "$output_master_key_file_path"
-	
-	printf '%s\n' "$utf8_encoded_passphrase"
-}
+. functions/brew.sh
+. functions/yubikey.sh
 
 depends stty
 securely_read_value()
@@ -216,153 +135,232 @@ securely_read_value()
 	value="$attempt1"
 }
 
-verb_yubikey_configure()
+depends dd hexdump
+random_hexadecimal_value_from_dev_urandom()
+{
+	local byte_count="$1"
+	
+	dd if=/dev/urandom bs=1 count="$byte_count" 2>/dev/null | hexdump -v -e '"%x"'
+}
+
+depends rm hexdump
+random_hexadecimal_value_from_smart_card()
+{
+	local byte_count="$1"
+	
+	local data_file_path="$temporary_folder_path"/random
+	gnupg_scdaemon_secure_random_bytes "$byte_count"
+	hexdump -v -e '"%x"' "$data_file_path"
+	rm "$data_file_path"
+}
+
+depends tr head
+random_alphanumeric_string_from_dev_urandom()
+{
+	local byte_count="$1"
+	
+	LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$byte_count"
+}
+
+depends tr head
+random_ascii_string_from_dev_urandom()
+{
+	local byte_count="$1"
+	
+	LC_ALL=C tr -dc 'A-Za-z0-9!"#$%&'\''()*+,-./:;<=>?@[\]^_`{|}~' </dev/urandom | head -c "$byte_count"
+}
+
+depends chmod mkdir cat
+verb_yubikey_reset()
 {
 	case $# in
 		
-		0)
-			set -- ykman
-		;;
-		
 		1)
-			set -- ykman --device "$1"
+			local device_number="$1"
+			local openpgp_surname="$2"
+			local openpgp_given_name="$3"
+			local openpgp_sex_code="$4"
+			local openpgp_display_language="$5"
 		;;
 		
 		*)
-			exit_error_message "0 or 1 arguments"
+			exit_usage_message "Specify DEVICE_NUMBER SURNAME GIVEN_NAME SEX (eg M, F or X) LANGUAGE (eg en)"
 		;;
 		
 	esac
-
-	ensure_ykman_installed
-	ensure_ykpers_installed
 	
+	case "$openpgp_sex_code"
+		
+		M)
+			local openpgp_sex=1
+		;;
+		
+		F)
+			local openpgp_sex=2
+		;;
+		
+		X)
+			local openpgp_sex=9
+		;;
+		
+		*)
+			exit_error_message "Unrecognised sex code $openpgp_sex_code"
+		;;
+		
+	esac
+	
+	printf 'Enter existing_config_lock_code (press return for none): ' 1>&2
 	local value
-	securely_read_value 'OpenPGP PIN'
-	local openpgp_pin="$value"
+	securely_read_value
+	local existing_config_lock_code="$value"
 	
-	securely_read_value 'OpenPGP ADMIN PIN'
-	local openpgp_admin_pin="$value"
+	# There is no restriction on the OATH password length; this is arbitrary.
+	local oath_password_length=32
+
+	# This is the default and can not be changed
+	local fido2_pin_retries=8
 	
-	"$@" config usb --enable-all
-	"$@" config usb --disable 'FIDO U2F'
-	
-	"$@" config nfc --enable-all
-	"$@" config nfc --disable 'FIDO U2F'
-	"$@" config nfc --disable 'OTP'
-	"$@" config nfc --disable 'YubiHSM Auth'
-	"$@" config nfc --disable 'OpenPGP'
-	"$@" config nfc --disable 'PIV'
-	
-	set +e
-		"$@" config set-lock-code --generate
-	set -e
-	
-	# --force must occur within 5 seconds of key insertion!
-	# This resets the FIDO2 PIN as well.
-	"$@" fido reset --force
-	
-	printf 'Enter a FIDO2 PIN below\n' 1>&2
-	"$@" fido access change-pin
-	
-	# This seems to be possible at any time.
-	# This resets the OATH password as well.
-	"$@" oath reset --force
-	
-	printf 'Enter a password to protect OATH below\n' 1>&2
-	"$@" oath access change
-	
-	# This seems to be possible at any time.
-	# This resets the PINs as well to the defaults of 123456 and 12345678.
-	"$@" openpgp reset --force
+	# These are the same as the defaults.
+	local piv_pin_retries=3
+	local piv_unlock_pin_retries=3
 	
 	# Default is 3.
-	local pin_retries=5
+	local openpgp_pin_retries=5
 	
 	# Default is 0.
-	local reset_code_reties=3
+	local openpgp_reset_code_retries=3
 	
 	# Default is 3.
-	local admin_pin_retries=3
+	local openpgp_admin_pin_retries=3
 	
-	local default_openpgp_admin_pin=12345678
-	"$@" openpgp access --admin-pin "$default_openpgp_admin_pin" "$pin_retries" "$reset_code_reties" "$admin_pin_retries"
+	local configuration_folder_path
+	set_configuration_folder_path
+
+	local device_configuration_folder_path="$configuration_folder_path"/"$device_number"
+	{
+		chmod 0700 "$configuration_folder_path"
+		mkdir -m 0500 -p "$device_configuration_folder_path"
+		chmod 0500 "$configuration_folder_path"
+	}
+
+	local piv_exported_public_key_folder_path="$device_configuration_folder_path"/piv
+	local openpgp_exported_public_key_folder_path="$device_configuration_folder_path"/openpgp
+	{
+		chmod 0700 "$device_configuration_folder_path"
+		mkdir -m 0500 -p "$piv_exported_public_key_folder_path"
+		mkdir -m 0500 -p "$openpgp_exported_public_key_folder_path"
+		chmod 0500 "$device_configuration_folder_path"
+	}
 	
-	# Forces touch policy on but caches each touch for 15 seconds.
-	# This isn't the most secure setting, but it is useful for doing key manipulation; think sudo.
-	local key_slot
-	for key_slot in sig enc aut att
-	do
-		"$@" openpgp keys set-touch --admin-pin "$default_openpgp_admin_pin" "$key_slot" Cached-Fixed
-	done
+	local config_lock_code="$(random_alphanumeric_string_from_dev_urandom 16)"
+	local fido2_pin="$(random_alphanumeric_string_from_dev_urandom 63)"
+	local oath_password="$(random_alphanumeric_string_from_dev_urandom $oath_password_length)"
+	local piv_pin="$(random_alphanumeric_string_from_dev_urandom 8)"
+	local piv_pin_unlock_pin="$(random_alphanumeric_string_from_dev_urandom 8)"
+	local piv_management_key="$(random_hexadecimal_value_from_dev_urandom 24)"
+	local openpgp_pin="$(random_alphanumeric_string_from_dev_urandom 32)"
+	local openpgp_admin_pin="$(random_alphanumeric_string_from_dev_urandom 32)"
 	
-	# Configure OpenPGP using OpenPGP: https://support.yubico.com/hc/en-us/articles/360016649139-YubiKey-5-2-3-Enhancements-to-OpenPGP-3-4-Support
-	
-	# Enable OpenPGP Key Derived Format (KDF) for PINs and set PINs.
-	cat >"$TMPDIR"/command.gpg <<-EOF
-		admin
-		kdf-setup
-		passwd
-		1
-	EOF
-	
-	# This fails.
-	gpg --homedir "$TMPDIR"/gpghome --no-option --command-file "$TMPDIR"/command.gpg --status-fd 2 --edit-card
-	
-	# Can be used for setting PINs and reset codes.
-	
-	# Clean Yubi OTP slots.
-	ykpersonalize -1 -z
-	ykpersonalize -2 -z
-	
-	# Generate OpenPGP public-private key pairs
-	gnupg_generate_secure_public_private_key_pairs
+	{
+		local device_user_keys_file_path="$device_configuration_folder_path"/user-keys
+		local device_administrator_keys_file_path="$device_configuration_folder_path"/administrator-keys
+		chmod 0700 "$device_configuration_folder_path"
+		cat >"$device_user_keys_file_path" <<-EOF
+			fido2_pin=${fido2_pin}
+			oath_password=${oath_password}
+			piv_pin=${piv_pin}
+			openpgp_pin=${openpgp_pin}
+		EOF
+		cat >"$device_administrator_keys_file_path" <<-EOF
+			config_lock_code=${config_lock_code}
+			piv_pin_unlock_pin=${piv_pin_unlock_pin}
+			piv_management_key=${piv_management_key}
+			openpgp_admin_pin=${openpgp_admin_pin}
+		EOF
+		chmod 0400 "$device_user_keys_file_path" "$device_administrator_keys_file_path"
+		chmod 0500 "$device_configuration_folder_path"
+	}
+
+	yubikey_reset "$device_number" \
+		"$existing_config_lock_code" "$config_lock_code" \
+		"$fido2_pin" \
+		"$oath_password" \
+		"$piv_pin" "$piv_pin_unlock_pin" "$piv_pin_retries" "$piv_unlock_pin_retries" "$piv_management_key" "$piv_exported_public_key_folder_path" \
+		"$openpgp_pin" "$openpgp_admin_pin" "$openpgp_pin_retries" "$openpgp_reset_code_retries" "$openpgp_admin_pin_retries" "$openpgp_exported_public_key_folder_path" "$openpgp_surname" "$openpgp_given_name" "$openpgp_sex" "$openpgp_display_language"
 }
 
 verb_yubikey_oath_add_uri()
 {
-	# uri must start 'otpath://'.
+	if [ $# -ne 2 ]; then
+		exit_usage_message "yubikey oath-add-uri requires DEVICE_NUMBER and URI"
+	fi
+	
+	local device_number="$1"
+	local uri="$2"
+	yubikey_oath_add_uri "$device_number" "$uri"
+}
 
+depends env
+parse_verb_smimesign()
+{
+	exec env -i PATH="$PATH" "$(pwd)"/tools/smimesign "$@"
+}
+
+parse_verb_yubikey()
+{
 	case $# in
 		
-		1)
-			local uri="$1"
-			set -- ykman
-		;;
-		
-		2)
-			local uri="$1"
-			set -- ykman --device "$2"
+		0)
+			exit_usage_message "No command specified for verb yubikey
+$help_message"
 		;;
 		
 		*)
-			exit_error_message "1 or 2 arguments"
+			local command="$1"
+			case "$command" in
+				
+				reset)
+					verb_yubikey_reset
+				;;
+				
+				oath-add-uri)
+					verb_yubikey_oath_add_uri
+				;;
+				
+				*)
+			exit_usage_message "Command $command is unrecognised for verb yubikey
+$help_message"
+				;;
+				
+			esac
 		;;
 		
 	esac
-
-	ensure_ykman_installed
-	
-	"$@" oath accounts uri "$uri"
 }
 
 parse_arguments()
 {
-	local help_message="./$_program_name verb
+	local help_message="./$_program_name <verb>
 Where verb is:-
 
 help
-install
-uninstall
-gnupg_create_master_key <name> <email>
+yubikey
 
-If called without arguments assumed to be the same as 'install'.
+Verb specific:-
+
+smimesign *
+	arguments to pass to smimesign
+
+yubikey
+	reset DEVICE_NUMBER
+	oath add-uri DEVICE_NUMBER URI
 "
 	
 	case $# in
 		
 		0)
-			local verb='install'
+			exit_usage_message "No verb specified
+$help_message"
 		;;
 		
 		*)
@@ -374,28 +372,17 @@ If called without arguments assumed to be the same as 'install'.
 					exit_help_message "$help_message"
 				;;
 				
-				install)
-					:
+				smimesign)
+					parse_verb_smimesign "$"
 				;;
 				
-				uninstall)
-					:
-				;;
-				
-				gnupg_create_master_key)
-					:
-				;;
-				
-				yubikey_configure)
-					:
-				;;
-				
-				yubikey_oath_add_uri)
-					:
+				yubikey)
+					parse_verb_yubikey "$@"
 				;;
 				
 				*)
-					exit_usage_message "$help_message"
+					exit_usage_message "Unrecognised verb
+$help_message"
 				;;
 				
 			esac

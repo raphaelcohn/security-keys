@@ -2,13 +2,13 @@
 # Copyright © 2021 The developers of security-keys. See the COPYRIGHT file in the top-level directory of this distribution and at https://raw.githubusercontent.com/raphaelcohn/security-keys/master/COPYRIGHT.
 
 
-set_smimesign_root_path()
+smimesign_set_root_path()
 {
 	smimesign_root_path="$(pwd)"/library/smimesign
 }
 
 depends readlink
-set_smimesign_version()
+smimesign_set_version()
 {
 	smimesign_current_path="$smimesign_root_path"/current
 	exit_if_symlink_missing "$smimesign_current_path"
@@ -17,7 +17,7 @@ set_smimesign_version()
 }
 
 depends uname
-set_smimesign_parent_path()
+smimesign_set_parent_path()
 {
 	local uname_operating_system="$(uname -s)"
 	local uname_architecture="$(uname -m)"
@@ -54,3 +54,5 @@ set_smimesign_parent_path()
 	
 	smimesign_parent_path="$smimesign_root_path"/current/"$smimesign_operating_system"/"$smimesign_architecture"
 }
+
+
